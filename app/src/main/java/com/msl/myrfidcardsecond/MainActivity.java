@@ -1,111 +1,178 @@
 package com.msl.myrfidcardsecond;
 
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
-
-import android.Manifest;
-import android.app.PendingIntent;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.pm.PackageManager;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
-import android.nfc.tech.Ndef;
-import android.nfc.tech.NfcA;
+import android.nfc.tech.IsoDep;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.widget.TextView;
-import android.widget.Toast;
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 
-public class MainActivity extends AppCompatActivity {
-    private static final int PERMISSION_REQUEST_CODE = 100;
-    private TextView resultTextView;
-    private NfcAdapter nfcAdapter;
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.github.devnied.emvnfccard.enums.EmvCardScheme;
+import com.github.devnied.emvnfccard.model.Application;
+import com.github.devnied.emvnfccard.model.EmvCard;
+import com.github.devnied.emvnfccard.parser.EmvTemplate;
+
+import java.io.IOException;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.Date;
+import java.util.List;
+
+public class MainActivity extends AppCompatActivity implements NfcAdapter.ReaderCallback {
+    TextView nfcaContent;
+    private NfcAdapter mNfcAdapter;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        resultTextView = findViewById(R.id.resultTextView);
-
-        // Check for NFC permission
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.NFC)
-                != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.NFC},
-                    PERMISSION_REQUEST_CODE);
-        } else {
-            initNfcAdapter();
-        }
+        nfcaContent = findViewById(R.id.resultTextView);
+        mNfcAdapter = NfcAdapter.getDefaultAdapter(this);
     }
-    private void initNfcAdapter() {
-        nfcAdapter = NfcAdapter.getDefaultAdapter(this);
-        if (nfcAdapter == null) {
-            Toast.makeText(this, "NFC is not supported on this device", Toast.LENGTH_SHORT).show();
-            finish();
-            return;
-        }
-        if (!nfcAdapter.isEnabled()) {
-            Toast.makeText(this, "NFC is not enabled", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-
     @Override
     protected void onResume() {
         super.onResume();
-        Intent intent = new Intent(this, getClass()).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);
-        IntentFilter[] intentFiltersArray = new IntentFilter[]{};
-        String[][] techListsArray = new String[][]{
-                {NfcA.class.getName()},
-                {Ndef.class.getName()}
-        };
-        if (nfcAdapter != null) {
-            nfcAdapter.enableForegroundDispatch(this, pendingIntent, intentFiltersArray, techListsArray);
+
+        if (mNfcAdapter != null) {
+            Bundle options = new Bundle();
+            // Work around for some broken Nfc firmware implementations that poll the card too fast
+            options.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250);
+
+            // Enable ReaderMode for all types of card and disable platform sounds
+            // the option NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK is NOT set
+            // to get the data of the tag after reading
+            mNfcAdapter.enableReaderMode(this,
+                    this,
+                    NfcAdapter.FLAG_READER_NFC_A |
+                            NfcAdapter.FLAG_READER_NFC_B |
+                            NfcAdapter.FLAG_READER_NFC_F |
+                            NfcAdapter.FLAG_READER_NFC_V |
+                            NfcAdapter.FLAG_READER_NFC_BARCODE |
+                            NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+                    options);
         }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        if (nfcAdapter != null) {
-            nfcAdapter.disableForegroundDispatch(this);
-        }
+        if (mNfcAdapter != null)
+            mNfcAdapter.disableReaderMode(this);
     }
 
+    // This method is run in another thread when a card is discovered
+    // !!!! This method cannot cannot direct interact with the UI Thread
+    // Use `runOnUiThread` method to change the UI from this method
     @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        if (NfcAdapter.ACTION_TECH_DISCOVERED.equals(intent.getAction())) {
-            Tag tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
-            String tagId = bytesToHexString(tag.getId());
-            resultTextView.setText("Tag ID: " + tagId);
-        }
-    }
+    public void onTagDiscovered(Tag tag) {
 
-    private String bytesToHexString(byte[] bytes) {
-        StringBuilder sb = new StringBuilder();
-        for (byte aByte : bytes) {
-            sb.append(String.format("%02X", aByte));
-        }
-        return sb.toString();
-    }
+        IsoDep isoDep = null;
 
-    @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
-                                           @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == PERMISSION_REQUEST_CODE) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                initNfcAdapter();
-            } else {
-                Toast.makeText(this, "NFC permission denied", Toast.LENGTH_SHORT).show();
+        // Whole process is put into a big try-catch trying to catch the transceive's IOException
+        try {
+            isoDep = IsoDep.get(tag);
+            if (isoDep != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    ((Vibrator) getSystemService(VIBRATOR_SERVICE)).vibrate(VibrationEffect.createOneShot(150, 10));
+                }
             }
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    //UI related things, not important for NFC
+                    nfcaContent.setText("");
+                }
+            });
+            isoDep.connect();
+            byte[] response;
+            String idContentString = "Content of ISO-DEP tag";
+
+            PcscProvider provider = new PcscProvider();
+            provider.setmTagCom(isoDep);
+
+            EmvTemplate.Config config = EmvTemplate.Config()
+                    .setContactLess(true)
+                    .setReadAllAids(true)
+                    .setReadTransactions(true)
+                    .setRemoveDefaultParsers(false)
+                    .setReadAt(true);
+
+            EmvTemplate parser = EmvTemplate.Builder()
+                    .setProvider(provider)
+                    .setConfig(config)
+                    .build();
+
+            EmvCard card = parser.readEmvCard();
+            String cardNumber = card.getCardNumber();
+            Date expireDate = card.getExpireDate();
+            LocalDate date = null;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                date = LocalDate.of(1999, 12, 31);
+            }
+            if (expireDate != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    date = expireDate.toInstant()
+                            .atZone(ZoneId.systemDefault())
+                            .toLocalDate();
+                }
+            }
+            EmvCardScheme cardGetType = card.getType();
+            if (cardGetType != null) {
+                String typeName = card.getType().getName();
+                String[] typeAids = card.getType().getAid();
+                idContentString = idContentString + "\n" + "typeName: " + typeName;
+                for (int i = 0; i < typeAids.length; i++) {
+                    idContentString = idContentString + "\n" + "aid " + i + " : " + typeAids[i];
+                }
+            }
+
+            List<Application> applications = card.getApplications();
+            idContentString = idContentString + "\n" + "cardNumber: " + prettyPrintCardNumber(cardNumber);
+            idContentString = idContentString + "\n" + "expireDate: " + date;
+
+            String finalIdContentString = idContentString;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    //UI related things, not important for NFC
+                    nfcaContent.setText(finalIdContentString);
+                }
+            });
+            try {
+                isoDep.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        } catch (IOException e) {
+            //Trying to catch any ioexception that may be thrown
+            e.printStackTrace();
+        } catch (Exception e) {
+            //Trying to catch any exception that may be thrown
+            e.printStackTrace();
         }
+
     }
+
+    @Override
+    public void onPointerCaptureChanged(boolean hasCapture) {
+        super.onPointerCaptureChanged(hasCapture);
+    }
+
+    public static String prettyPrintCardNumber(String cardNumber) {
+        if (cardNumber == null) return null;
+        char delimiter = ' ';
+        return cardNumber.replaceAll(".{4}(?!$)", "$0" + delimiter);
+    }
+
+    public static String bytesToHex(byte[] bytes) {
+        StringBuffer result = new StringBuffer();
+        for (byte b : bytes) result.append(Integer.toString((b & 0xff) + 0x100, 16).substring(1));
+        return result.toString();
+    }
+
 }
